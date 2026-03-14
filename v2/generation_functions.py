@@ -29,9 +29,15 @@ class Fast_dLLM_QwenForCausalLM:
         use_block_cache=False,
         top_p=0.95,
         temperature=0.0,
-    ):
+    ):  
         num_blocks = max_new_tokens // block_size + seq_len.max().item() // block_size
         batch_size = input_ids.shape[0]
+
+        trace_recorder = getattr(self, "trace_recorder", None)
+        if trace_recorder is not None:
+            if batch_size != 1:
+                raise ValueError("Use batch_size=1 while building baseline traces")
+            trace_recorder.start_new_sample(prompt_len=int(seq_len[0].item()))
 
         if min_len > block_size:
             output = self.forward(input_ids=input_ids[:, :(min_len // block_size * block_size)], use_cache=True, update_past_key_values=True, block_size=block_size)
@@ -108,9 +114,27 @@ class Fast_dLLM_QwenForCausalLM:
                                 logits = self.forward(input_ids=x_t[:,start:end], use_cache=True, past_key_values=past_key_values, update_past_key_values=False, use_block_cache=True, block_past_key_values=block_past_key_values, replace_position=small_block_start_idx).logits
                                 logits = torch.cat([logits[:, :1, :], logits[:, :-1, :]], dim=1)
                         else:
-                            logits = self.forward(input_ids=x_t[:, -block_size:], use_cache=True, past_key_values=past_key_values, update_past_key_values=False).logits
+                            # logits = self.forward(input_ids=x_t[:, -block_size:], use_cache=True, past_key_values=past_key_values, update_past_key_values=False).logits
+                            # logits = torch.cat([logits[:, :1, :], logits[:, :-1, :]], dim=1)
+                            # logits = logits[:, start:end]
+                            output = self.forward(
+                                input_ids=x_t[:, -block_size:],
+                                use_cache=True,
+                                past_key_values=past_key_values,
+                                update_past_key_values=False,
+                                trace_recorder=trace_recorder,
+                                trace_context={
+                                    "phase": "decode",
+                                    "call_type": "denoise",
+                                    "block_idx": int(block_idx),
+                                    "small_block_idx": int(small_block_idx),
+                                    "step_idx": int(step),
+                                },
+                            )
+                            logits = output.logits
                             logits = torch.cat([logits[:, :1, :], logits[:, :-1, :]], dim=1)
                             logits = logits[:, start:end]
+
                         x_1, p_1t = self.sample_with_top_p(logits, top_p=top_p, temperature=temperature)
                         x1_p = torch.squeeze(torch.gather(p_1t, dim=-1, index=torch.unsqueeze(x_1, -1)), -1)
                         x1_p = torch.where(mask_idx[:, start:end], x1_p, -torch.inf)
@@ -165,6 +189,10 @@ class Fast_dLLM_QwenForCausalLM:
                 finished_samples[original_idx] = x_t[sample_idx:sample_idx+1].clone().squeeze(dim=0)
         
         assert len(finished_samples) == batch_size
+
+        if trace_recorder is not None:
+            trace_recorder.save_current_sample()
+
         return finished_samples
 
     @torch.no_grad()

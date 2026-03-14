@@ -37,6 +37,8 @@ import time
 import types
 import generation_functions
 
+from baseline_trace import BaselineTraceRecorder
+
 def set_seed(seed):
     torch.manual_seed(seed)
     random.seed(seed)
@@ -82,6 +84,7 @@ class Fast_dLLM_v2EvalHarness(LM):
             **model_kwargs
         )
         self.model.eval()
+        self.model.trace_recorder = BaselineTraceRecorder(save_dir="baseline_logs_100")
 
         self.model.mdm_sample = types.MethodType(generation_functions.Fast_dLLM_QwenForCausalLM.batch_sample, self.model)
 
