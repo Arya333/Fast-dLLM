@@ -104,8 +104,14 @@ class Fast_dLLM_QwenMLP(nn.Module):
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
         self.act_fn = ACT2FN[config.hidden_act]
 
-    def forward(self, x):
-        down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+    def forward(self, x, return_temp=False):
+        # temp is the FFN intermediate before the final down projection
+        temp = self.act_fn(self.gate_proj(x)) * self.up_proj(x)
+        down_proj = self.down_proj(temp)
+
+        if return_temp:
+            return down_proj, temp
+
         return down_proj
 
 
@@ -183,6 +189,8 @@ class Fast_dLLM_QwenAttention(nn.Module):
         update_past_key_values: Optional[bool] = False,
         block_past_key_values: Optional[Cache] = None,
         replace_position: Optional[int] = None,
+        trace_recorder=None,
+        trace_context=None,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[tuple[torch.Tensor]]]:
         input_shape = hidden_states.shape[:-1]
@@ -236,7 +244,42 @@ class Fast_dLLM_QwenAttention(nn.Module):
         else:
             attention_interface = ALL_ATTENTION_FUNCTIONS["sdpa"]
 
-            attn_output, attn_weights = attention_interface(
+            # attn_output, attn_weights = attention_interface(
+            #     self,
+            #     query_states,
+            #     key_states,
+            #     value_states,
+            #     attention_mask,
+            #     is_causal=False,
+            #     dropout=0.0 if not self.training else self.attention_dropout,
+            #     scaling=self.scaling,
+            #     sliding_window=self.sliding_window,  # main diff with Llama
+            #     **kwargs,
+            # )
+
+            # if trace_recorder is not None:
+            #     trace_recorder.record_attn_weights(
+            #         layer_idx=self.layer_idx,
+            #         attn_weights=attn_weights,
+            #         trace_context=trace_context,
+            #     )
+
+            # Assignment's attention-weight computation for logging
+            attn_weight_for_log = None
+            if trace_recorder is not None:
+                key_states_for_log = key_states
+                if key_states_for_log.shape[1] != query_states.shape[1]:
+                    key_states_for_log = repeat_kv(key_states_for_log, self.num_key_value_groups)
+
+                attn_scores_for_log = torch.matmul(
+                    query_states.float(),
+                    key_states_for_log.float().transpose(2, 3),
+                )
+                attn_scores_for_log = attn_scores_for_log * self.scaling
+                # attn_scores_for_log = attn_scores_for_log - attn_scores_for_log.amax(dim=-1, keepdim=True) # doing this so that exp doesn't lead to NaNs (numbers being too large)
+                attn_weight_for_log = torch.exp(attn_scores_for_log)
+
+            attn_output, _ = attention_interface(
                 self,
                 query_states,
                 key_states,
@@ -248,6 +291,18 @@ class Fast_dLLM_QwenAttention(nn.Module):
                 sliding_window=self.sliding_window,  # main diff with Llama
                 **kwargs,
             )
+
+            # if trace_recorder is not None:
+            #     trace_recorder.record_attn_weights(
+            #         layer_idx=self.layer_idx,
+            #         attn_weights=attn_weight_for_log,
+            #         trace_context=trace_context,
+            #     )
+            #     trace_recorder.record_attn_weight_range(
+            #         layer_idx=self.layer_idx,
+            #         attn_weights=attn_weight_for_log,
+            #         trace_context=trace_context,
+            #     )
 
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)
@@ -306,12 +361,12 @@ class Fast_dLLM_QwenDecoderLayer(GradientCheckpointingLayer):
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
 
-        if trace_recorder is not None:
-            trace_recorder.record_ln_hidden(
-                layer_idx=self.self_attn.layer_idx,
-                ln_hidden=hidden_states,
-                trace_context=trace_context,
-            )
+        # if trace_recorder is not None:
+        #     trace_recorder.record_ln_hidden(
+        #         layer_idx=self.self_attn.layer_idx,
+        #         ln_hidden=hidden_states,
+        #         trace_context=trace_context,
+        #     )
 
         # Self Attention
         attn_output = self.self_attn(
@@ -326,29 +381,39 @@ class Fast_dLLM_QwenDecoderLayer(GradientCheckpointingLayer):
             use_block_cache=use_block_cache,
             block_past_key_values=block_past_key_values,
             replace_position=replace_position,
+            trace_recorder=trace_recorder,
+            trace_context=trace_context,
             **kwargs,
         )
 
-        if trace_recorder is not None:
-            trace_recorder.record_attn_output(
-                layer_idx=self.self_attn.layer_idx,
-                attn_output=attn_output,
-                trace_context=trace_context,
-            )
+        # if trace_recorder is not None:
+        #     trace_recorder.record_attn_output(
+        #         layer_idx=self.self_attn.layer_idx,
+        #         attn_output=attn_output,
+        #         trace_context=trace_context,
+        #     )
 
         hidden_states = residual + attn_output
 
         # Fully Connected
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
-        ffn_output = self.mlp(hidden_states)
-
         if trace_recorder is not None:
-            trace_recorder.record_ffn_output(
+            ffn_output, ffn_temp = self.mlp(hidden_states, return_temp=True)
+            trace_recorder.record_ffn_temp(
                 layer_idx=self.self_attn.layer_idx,
-                ffn_output=ffn_output,
+                ffn_temp=ffn_temp,
                 trace_context=trace_context,
             )
+        else:
+            ffn_output = self.mlp(hidden_states)
+
+        # if trace_recorder is not None:
+        #     trace_recorder.record_ffn_output(
+        #         layer_idx=self.self_attn.layer_idx,
+        #         ffn_output=ffn_output,
+        #         trace_context=trace_context,
+        #     )
 
         hidden_states = residual + ffn_output
         return hidden_states

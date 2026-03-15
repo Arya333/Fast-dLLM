@@ -84,7 +84,7 @@ class Fast_dLLM_v2EvalHarness(LM):
             **model_kwargs
         )
         self.model.eval()
-        self.model.trace_recorder = BaselineTraceRecorder(save_dir="baseline_logs_100_haf")
+        self.model.trace_recorder = BaselineTraceRecorder(save_dir="baseline_logs_100_ffn_temp")
 
         self.model.mdm_sample = types.MethodType(generation_functions.Fast_dLLM_QwenForCausalLM.batch_sample, self.model)
 
