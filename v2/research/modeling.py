@@ -314,7 +314,7 @@ class Fast_dLLM_QwenDecoderLayer(GradientCheckpointingLayer):
             )
 
         # Self Attention
-        hidden_states = self.self_attn(
+        attn_output = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             position_ids=position_ids,
@@ -328,13 +328,29 @@ class Fast_dLLM_QwenDecoderLayer(GradientCheckpointingLayer):
             replace_position=replace_position,
             **kwargs,
         )
-        hidden_states = residual + hidden_states
+
+        if trace_recorder is not None:
+            trace_recorder.record_attn_output(
+                layer_idx=self.self_attn.layer_idx,
+                attn_output=attn_output,
+                trace_context=trace_context,
+            )
+
+        hidden_states = residual + attn_output
 
         # Fully Connected
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
-        hidden_states = residual + hidden_states
+        ffn_output = self.mlp(hidden_states)
+
+        if trace_recorder is not None:
+            trace_recorder.record_ffn_output(
+                layer_idx=self.self_attn.layer_idx,
+                ffn_output=ffn_output,
+                trace_context=trace_context,
+            )
+
+        hidden_states = residual + ffn_output
         return hidden_states
 
 
