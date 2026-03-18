@@ -31,6 +31,7 @@ from lm_eval.api.model import LM
 from lm_eval.api.registry import register_model
 from tqdm import tqdm
 import os
+import sys
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
 import json
 import time
@@ -38,6 +39,21 @@ import types
 import generation_functions
 
 from baseline_trace import BaselineTraceRecorder
+
+TOKEN_SKIP_DIR = os.path.join(os.path.dirname(__file__), "compute-skipping", "token-level")
+if TOKEN_SKIP_DIR not in sys.path:
+    sys.path.append(TOKEN_SKIP_DIR)
+
+LAYER_SKIP_DIR = os.path.join(os.path.dirname(__file__), "compute-skipping", "layer-level")
+if LAYER_SKIP_DIR not in sys.path:
+    sys.path.append(LAYER_SKIP_DIR)
+
+from token_skip_config import TokenSkipConfig
+from token_skip_manager import TokenSkipManager
+from token_skip_stats import TokenSkipStatsRecorder
+from layer_skip_config import LayerSkipConfig
+from layer_skip_manager import LayerSkipManager
+from layer_skip_stats import LayerSkipStatsRecorder
 
 def set_seed(seed):
     torch.manual_seed(seed)
@@ -62,6 +78,13 @@ class Fast_dLLM_v2EvalHarness(LM):
         small_block_size=8,
         bd_size=32,
         threshold=0.9,
+        token_skip_enabled=False,
+        token_skip_mode="threshold",
+        token_skip_threshold=0.99,
+        token_skip_topk_percent=None,
+        layer_skip_enabled=False,
+        layer_skip_aggregation="avg",
+        layer_skip_threshold=0.99,
         **kwargs,
     ):
 
@@ -77,6 +100,18 @@ class Fast_dLLM_v2EvalHarness(LM):
         if self.accelerator is not None:
             model_kwargs.update({'device_map': {'': f'{self.accelerator.device}'}})
         
+        if isinstance(token_skip_enabled, str):
+            token_skip_enabled = token_skip_enabled.lower() == "true"
+        if isinstance(layer_skip_enabled, str):
+            layer_skip_enabled = layer_skip_enabled.lower() == "true"
+        token_skip_threshold = float(token_skip_threshold)
+        if token_skip_topk_percent is not None:
+            token_skip_topk_percent = float(token_skip_topk_percent)
+        layer_skip_threshold = float(layer_skip_threshold)
+
+        if token_skip_enabled and layer_skip_enabled:
+            raise ValueError("Enable either token-level skipping or layer-level skipping, not both")
+
         self.model = AutoModelForCausalLM.from_pretrained(
             model_path, 
             trust_remote_code=True, 
@@ -84,7 +119,37 @@ class Fast_dLLM_v2EvalHarness(LM):
             **model_kwargs
         )
         self.model.eval()
-        self.model.trace_recorder = BaselineTraceRecorder(save_dir="baseline_logs_100_ffn_temp")
+        # self.model.trace_recorder = BaselineTraceRecorder(save_dir="baseline_logs_test")
+        self.model.skip_stats_recorder = None
+        self.model.token_skip_manager = None
+        self.model.layer_skip_manager = None
+
+        if layer_skip_enabled:
+            layer_skip_config = LayerSkipConfig(
+                enabled=layer_skip_enabled,
+                aggregation=layer_skip_aggregation,
+                threshold=layer_skip_threshold,
+            )
+            skip_save_dir = os.path.join("compute-skipping", "logs", layer_skip_config.setting_name())
+            self.model.skip_stats_recorder = LayerSkipStatsRecorder(save_dir=skip_save_dir)
+            self.model.layer_skip_manager = LayerSkipManager(
+                config=layer_skip_config,
+                stats_recorder=self.model.skip_stats_recorder,
+            )
+        else:
+            token_skip_config = TokenSkipConfig(
+                enabled=token_skip_enabled,
+                mode=token_skip_mode,
+                threshold=token_skip_threshold,
+                topk_percent=token_skip_topk_percent,
+            )
+            skip_save_dir = os.path.join("compute-skipping", "logs", token_skip_config.setting_name())
+            self.model.skip_stats_recorder = TokenSkipStatsRecorder(save_dir=skip_save_dir)
+            self.model.token_skip_manager = TokenSkipManager(
+                config=token_skip_config,
+                stats_recorder=self.model.skip_stats_recorder,
+            )
+
 
         self.model.mdm_sample = types.MethodType(generation_functions.Fast_dLLM_QwenForCausalLM.batch_sample, self.model)
 

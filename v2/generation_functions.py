@@ -38,6 +38,25 @@ class Fast_dLLM_QwenForCausalLM:
             if batch_size != 1:
                 raise ValueError("Use batch_size=1 while building baseline traces")
             trace_recorder.start_new_sample(prompt_len=int(seq_len[0].item()))
+        
+        skip_stats_recorder = getattr(self, "skip_stats_recorder", None)
+        if skip_stats_recorder is not None:
+            if batch_size != 1:
+                raise ValueError("Use batch_size=1 while collecting token skip stats")
+            skip_stats_recorder.start_new_sample(prompt_len=int(seq_len[0].item()))
+
+        token_skip_manager = getattr(self, "token_skip_manager", None)
+        layer_skip_manager = getattr(self, "layer_skip_manager", None)
+
+        if token_skip_manager is not None and layer_skip_manager is not None:
+            raise ValueError("Only one skip manager should be active at a time")
+
+        active_skip_manager = token_skip_manager if token_skip_manager is not None else layer_skip_manager
+        if active_skip_manager is not None:
+            if batch_size != 1:
+                raise ValueError("Use batch_size=1 while running compute skipping")
+            active_skip_manager.start_new_sample()
+
 
         if min_len > block_size:
             output = self.forward(input_ids=input_ids[:, :(min_len // block_size * block_size)], use_cache=True, update_past_key_values=True, block_size=block_size)
@@ -61,6 +80,9 @@ class Fast_dLLM_QwenForCausalLM:
 
         sample_indices = torch.arange(batch_size, device=self.device)
         finished_samples = {}
+
+        total_denoising_steps = 0        
+
         for block_idx in range(start_block_idx, num_blocks):
             if finished_flag.all():
                 break
@@ -90,7 +112,7 @@ class Fast_dLLM_QwenForCausalLM:
                     next_token[finished_flag] = tokenizer.pad_token_id
                     x_t = torch.cat([x_t, next_token], dim=1)
                     step += 1
-
+                    total_denoising_steps += 1
                     break
                 
                 for small_block_idx in range(num_small_blocks):
@@ -117,19 +139,27 @@ class Fast_dLLM_QwenForCausalLM:
                             # logits = self.forward(input_ids=x_t[:, -block_size:], use_cache=True, past_key_values=past_key_values, update_past_key_values=False).logits
                             # logits = torch.cat([logits[:, :1, :], logits[:, :-1, :]], dim=1)
                             # logits = logits[:, start:end]
-                            output = self.forward(
-                                input_ids=x_t[:, -block_size:],
-                                use_cache=True,
-                                past_key_values=past_key_values,
-                                update_past_key_values=False,
-                                trace_recorder=trace_recorder,
-                                trace_context={
+                            forward_kwargs = {
+                                "input_ids": x_t[:, -block_size:],
+                                "use_cache": True,
+                                "past_key_values": past_key_values,
+                                "update_past_key_values": False,
+                                "trace_recorder": trace_recorder,
+                                "trace_context": {
                                     "phase": "decode",
                                     "call_type": "denoise",
                                     "block_idx": int(block_idx),
                                     "small_block_idx": int(small_block_idx),
                                     "step_idx": int(step),
                                 },
+                            }
+                            if token_skip_manager is not None:
+                                forward_kwargs["token_skip_manager"] = token_skip_manager
+                            if layer_skip_manager is not None:
+                                forward_kwargs["layer_skip_manager"] = layer_skip_manager
+
+                            output = self.forward(
+                                **forward_kwargs,
                             )
                             logits = output.logits
                             logits = torch.cat([logits[:, :1, :], logits[:, :-1, :]], dim=1)
@@ -150,6 +180,7 @@ class Fast_dLLM_QwenForCausalLM:
                         finished_flag = finished_flag | finished_row_flags
 
                         step += 1
+                        total_denoising_steps += 1
 
             if input_ids.shape[1] ==  x_t.shape[1]:
                 input_ids = x_t
@@ -192,6 +223,10 @@ class Fast_dLLM_QwenForCausalLM:
 
         if trace_recorder is not None:
             trace_recorder.save_current_sample()
+        
+        if skip_stats_recorder is not None:
+            skip_stats_recorder.set_sample_total_denoising_steps(total_denoising_steps)
+            skip_stats_recorder.save_current_sample()
 
         return finished_samples
 
@@ -299,6 +334,7 @@ class Fast_dLLM_QwenForCausalLM:
                         logits = logits[:, start:end]
                             
                         step += 1
+
                         x_1, p_1t = self.sample_with_top_p(logits, top_p=top_p, temperature=temperature)
 
                         # Select tokens with probability greater than threshold in p_1t

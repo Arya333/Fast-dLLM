@@ -1,0 +1,19 @@
+setting_id,group,display_name,point_label,accuracy,flop_reduction_pct,avg_denoising_steps,log_dir
+baseline,baseline,Baseline,baseline,,,compute-skipping/logs/baseline
+token_threshold_0.995,token_cosine,Token cosine 0.995,0.995,,,compute-skipping/logs/token_threshold_0.995
+token_threshold_0.99,token_cosine,Token cosine 0.99,0.99,,,compute-skipping/logs/token_threshold_0.99
+token_threshold_0.98,token_cosine,Token cosine 0.98,0.98,,,compute-skipping/logs/token_threshold_0.98
+token_threshold_0.97,token_cosine,Token cosine 0.97,0.97,,,compute-skipping/logs/token_threshold_0.97
+token_threshold_0.96,token_cosine,Token cosine 0.96,0.96,,,compute-skipping/logs/token_threshold_0.96
+token_topk_25,token_topk,Token top-k 25%,25%,,,compute-skipping/logs/token_topk_25
+token_topk_50,token_topk,Token top-k 50%,50%,,,compute-skipping/logs/token_topk_50
+layer_avg_0.999,layer_avg,Layer avg 0.999,0.999,,,compute-skipping/logs/layer_avg_0.999
+layer_avg_0.995,layer_avg,Layer avg 0.995,0.995,,,compute-skipping/logs/layer_avg_0.995
+layer_avg_0.99,layer_avg,Layer avg 0.99,0.99,,,compute-skipping/logs/layer_avg_0.99
+layer_avg_0.98,layer_avg,Layer avg 0.98,0.98,,,compute-skipping/logs/layer_avg_0.98
+layer_avg_0.97,layer_avg,Layer avg 0.97,0.97,,,compute-skipping/logs/layer_avg_0.97
+layer_max_0.999,layer_max,Layer max 0.999,0.999,,,compute-skipping/logs/layer_max_0.999
+layer_max_0.995,layer_max,Layer max 0.995,0.995,,,compute-skipping/logs/layer_max_0.995
+layer_max_0.99,layer_max,Layer max 0.99,0.99,,,compute-skipping/logs/layer_max_0.99
+layer_max_0.98,layer_max,Layer max 0.98,0.98,,,compute-skipping/logs/layer_max_0.98
+layer_max_0.97,layer_max,Layer max 0.97,0.97,,,compute-skipping/logs/layer_max_0.97

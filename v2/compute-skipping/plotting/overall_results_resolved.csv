@@ -1,0 +1,19 @@
+setting_id,group,display_name,point_label,accuracy_pct,flop_reduction_pct,avg_denoising_steps,log_dir
+baseline,baseline,Baseline,baseline,82.00,0.00,106.99,compute-skipping/logs/baseline
+token_threshold_0.995,token_cosine,Token cosine 0.995,0.995,78.00,73.71,274.29,compute-skipping/logs/token_threshold_0.995
+token_threshold_0.99,token_cosine,Token cosine 0.99,0.99,78.00,74.55,273.64,compute-skipping/logs/token_threshold_0.99
+token_threshold_0.98,token_cosine,Token cosine 0.98,0.98,79.00,74.33,273.89,compute-skipping/logs/token_threshold_0.98
+token_threshold_0.97,token_cosine,Token cosine 0.97,0.97,79.00,74.31,274.26,compute-skipping/logs/token_threshold_0.97
+token_threshold_0.96,token_cosine,Token cosine 0.96,0.96,79.00,73.72,274.09,compute-skipping/logs/token_threshold_0.96
+token_topk_25,token_topk,Token top-k 25%,25%,75.00,48.20,173.11,compute-skipping/logs/token_topk_25
+token_topk_50,token_topk,Token top-k 50%,50%,78.00,36.85,120.85,compute-skipping/logs/token_topk_50
+layer_avg_0.999,layer_avg,Layer avg 0.999,0.999,82.00,0.10,106.85,compute-skipping/logs/layer_avg_0.999
+layer_avg_0.995,layer_avg,Layer avg 0.995,0.995,81.00,0.94,107.08,compute-skipping/logs/layer_avg_0.995
+layer_avg_0.99,layer_avg,Layer avg 0.99,0.99,78.00,0.35,112.35,compute-skipping/logs/layer_avg_0.99
+layer_avg_0.98,layer_avg,Layer avg 0.98,0.98,61.00,0.59,188.30,compute-skipping/logs/layer_avg_0.98
+layer_avg_0.97,layer_avg,Layer avg 0.97,0.97,25.00,-57.55,526.98,compute-skipping/logs/layer_avg_0.97
+layer_max_0.999,layer_max,Layer max 0.999,0.999,0.00,32.81,1313.65,compute-skipping/logs/layer_max_0.999
+layer_max_0.995,layer_max,Layer max 0.995,0.995,0.00,32.81,1313.65,compute-skipping/logs/layer_max_0.995
+layer_max_0.99,layer_max,Layer max 0.99,0.99,0.00,32.81,1313.65,compute-skipping/logs/layer_max_0.99
+layer_max_0.98,layer_max,Layer max 0.98,0.98,0.00,32.81,1266.58,compute-skipping/logs/layer_max_0.98
+layer_max_0.97,layer_max,Layer max 0.97,0.97,0.00,32.81,1266.58,compute-skipping/logs/layer_max_0.97
