@@ -1,3 +1,5 @@
+# This script plots the normalized layer-level hidden-state similarity heatmap (across 100 samples) from the baseline trace logs.
+
 import json
 from pathlib import Path
 

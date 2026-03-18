@@ -1,3 +1,5 @@
+# This script plots the attention-weight value-range distribution (across 100 samples) from the baseline trace logs.
+
 import json
 from pathlib import Path
 
@@ -15,7 +17,7 @@ if len(json_paths) == 0:
 
 num_bins = 40
 
-# We aggregate over all samples, steps, layers, and tokens.
+# Aggregate over all samples, steps, layers, and tokens
 total_bin_counts = np.zeros(num_bins, dtype=np.float64)
 
 global_total = 0.0

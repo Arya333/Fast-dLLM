@@ -1,3 +1,5 @@
+# This script plots hidden-state, attention, and FFN similarity scatter comparisons (across 100 samples) from the baseline trace logs.
+
 import json
 from pathlib import Path
 

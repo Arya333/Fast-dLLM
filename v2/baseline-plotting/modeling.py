@@ -105,7 +105,7 @@ class Fast_dLLM_QwenMLP(nn.Module):
         self.act_fn = ACT2FN[config.hidden_act]
 
     def forward(self, x, return_temp=False):
-        # temp is the FFN intermediate before the final down projection
+        # Expose the FFN intermediate when baseline plotting needs to trace it.
         temp = self.act_fn(self.gate_proj(x)) * self.up_proj(x)
         down_proj = self.down_proj(temp)
 
@@ -264,7 +264,7 @@ class Fast_dLLM_QwenAttention(nn.Module):
             #         trace_context=trace_context,
             #     )
 
-            # Assignment's attention-weight computation for logging
+            # Build the raw attention-weight quantity used by the baseline plotting assignment.
             attn_weight_for_log = None
             if trace_recorder is not None:
                 key_states_for_log = key_states
@@ -292,17 +292,18 @@ class Fast_dLLM_QwenAttention(nn.Module):
                 **kwargs,
             )
 
-            # if trace_recorder is not None:
-            #     trace_recorder.record_attn_weights(
-            #         layer_idx=self.layer_idx,
-            #         attn_weights=attn_weight_for_log,
-            #         trace_context=trace_context,
-            #     )
-            #     trace_recorder.record_attn_weight_range(
-            #         layer_idx=self.layer_idx,
-            #         attn_weights=attn_weight_for_log,
-            #         trace_context=trace_context,
-            #     )
+            if trace_recorder is not None:
+                # Log both the weight similarity and the value-range histogram used in Part C.
+                trace_recorder.record_attn_weights(
+                    layer_idx=self.layer_idx,
+                    attn_weights=attn_weight_for_log,
+                    trace_context=trace_context,
+                )
+                trace_recorder.record_attn_weight_range(
+                    layer_idx=self.layer_idx,
+                    attn_weights=attn_weight_for_log,
+                    trace_context=trace_context,
+                )
 
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)
@@ -361,12 +362,13 @@ class Fast_dLLM_QwenDecoderLayer(GradientCheckpointingLayer):
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
 
-        # if trace_recorder is not None:
-        #     trace_recorder.record_ln_hidden(
-        #         layer_idx=self.self_attn.layer_idx,
-        #         ln_hidden=hidden_states,
-        #         trace_context=trace_context,
-        #     )
+        if trace_recorder is not None:
+            # Hidden-state similarity is measured on the layer input after RMSNorm.
+            trace_recorder.record_ln_hidden(
+                layer_idx=self.self_attn.layer_idx,
+                ln_hidden=hidden_states,
+                trace_context=trace_context,
+            )
 
         # Self Attention
         attn_output = self.self_attn(
@@ -386,12 +388,13 @@ class Fast_dLLM_QwenDecoderLayer(GradientCheckpointingLayer):
             **kwargs,
         )
 
-        # if trace_recorder is not None:
-        #     trace_recorder.record_attn_output(
-        #         layer_idx=self.self_attn.layer_idx,
-        #         attn_output=attn_output,
-        #         trace_context=trace_context,
-        #     )
+        if trace_recorder is not None:
+            # Compare the attention module output before it is mixed back with the residual.
+            trace_recorder.record_attn_output(
+                layer_idx=self.self_attn.layer_idx,
+                attn_output=attn_output,
+                trace_context=trace_context,
+            )
 
         hidden_states = residual + attn_output
 
@@ -399,6 +402,7 @@ class Fast_dLLM_QwenDecoderLayer(GradientCheckpointingLayer):
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
         if trace_recorder is not None:
+            # Part C traces the FFN intermediate before the final down projection.
             ffn_output, ffn_temp = self.mlp(hidden_states, return_temp=True)
             trace_recorder.record_ffn_temp(
                 layer_idx=self.self_attn.layer_idx,
@@ -408,12 +412,13 @@ class Fast_dLLM_QwenDecoderLayer(GradientCheckpointingLayer):
         else:
             ffn_output = self.mlp(hidden_states)
 
-        # if trace_recorder is not None:
-        #     trace_recorder.record_ffn_output(
-        #         layer_idx=self.self_attn.layer_idx,
-        #         ffn_output=ffn_output,
-        #         trace_context=trace_context,
-        #     )
+        if trace_recorder is not None:
+            # Also keep the final FFN output similarity for the baseline plots.
+            trace_recorder.record_ffn_output(
+                layer_idx=self.self_attn.layer_idx,
+                ffn_output=ffn_output,
+                trace_context=trace_context,
+            )
 
         hidden_states = residual + ffn_output
         return hidden_states
@@ -594,6 +599,7 @@ class Fast_dLLM_QwenModel(Fast_dLLM_QwenPreTrainedModel):
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
         for decoder_layer in self.layers[: self.config.num_hidden_layers]:
+            # Thread the recorder through every layer so baseline traces stay aligned by step and layer.
             hidden_states = decoder_layer(
                 hidden_states,
                 attention_mask=attention_mask,
