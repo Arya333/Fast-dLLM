@@ -1,3 +1,67 @@
+## Repository Additions for Baseline Plotting and Compute Skipping
+
+The sections below summarize the code added or modified for the baseline plotting and compute skipping experiments. The original project README starts immediately after this overview.
+
+```text
+v2/
+├── eval.py
+├── generation_functions.py
+├── baseline-plotting/
+│   ├── baseline_trace.py
+│   ├── modeling.py
+│   ├── part-a-scripts/
+│   ├── part-b-scripts/
+│   └── part-c-scripts/
+└── compute-skipping/
+    ├── token-level/
+    │   ├── token_skip_config.py
+    │   ├── token_skip_policy.py
+    │   ├── token_skip_manager.py
+    │   ├── token_skip_stats.py
+    │   └── modeling.py
+    ├── layer-level/
+    │   ├── layer_skip_config.py
+    │   ├── layer_skip_policy.py
+    │   ├── layer_skip_manager.py
+    │   ├── layer_skip_stats.py
+    │   └── modeling.py
+    └── plotting/
+        └── plot_accuracy_vs_flops.py
+```
+
+### Top-Level Runtime Files
+
+- `eval.py`: Main evaluation entry point that loads the model, parses experiment settings, and launches `lm_eval` runs. I added the token-level and layer-level skip configuration hooks here so each setting can attach the correct manager and stats recorder during evaluation.
+- `generation_functions.py`: Core decode-time sampling logic for Fast-dLLM generation. I added the per-sample recorder setup, denoising-step tracking, and skip-context plumbing so the compute-skipping experiments can log step counts and layer-step statistics.
+
+### `baseline-plotting/`
+
+- `baseline-plotting/baseline_trace.py`: Recorder used for the baseline analysis experiments. It saves per-sample hidden-state, attention, and FFN trace data into JSON files that the plotting scripts read later.
+- `baseline-plotting/modeling.py`: Baseline-trace-only model variant with the tracing hooks added around the forward pass. This file was meant to be copy-pasted into the active runtime `modeling.py` when collecting baseline trace logs, and it isolates only the baseline plotting modifications.
+- `baseline-plotting/part-a-scripts/`: Plotting scripts for Part A baseline analysis. These scripts generate the layer-level hidden-state heatmaps and 100-sample summary plots from the baseline trace logs.
+- `baseline-plotting/part-b-scripts/`: Plotting scripts for Part B baseline analysis. These scripts generate the token-level hidden-state plots and the hidden-vs-attention / hidden-vs-FFN scatter plots from the baseline trace logs.
+- `baseline-plotting/part-c-scripts/`: Plotting scripts for Part C baseline analysis. These scripts generate the attention similarity, attention range, and FFN similarity figures from the baseline trace logs.
+
+### `compute-skipping/layer-level/`
+
+- `compute-skipping/layer-level/layer_skip_config.py`: Configuration object for the layer-level skipping experiments. It stores the enabled state, aggregation mode, threshold, and naming logic for each layer-skip setting.
+- `compute-skipping/layer-level/layer_skip_policy.py`: Policy logic for deciding whether an entire layer should be reused. It computes per-token cosine similarity across adjacent denoising steps and reduces those scores with `avg` or `max` before applying the threshold.
+- `compute-skipping/layer-level/layer_skip_manager.py`: Runtime state manager for layer-level skipping. It caches previous-step layer inputs and outputs, builds the per-layer reuse plan, and writes the skip statistics needed for later FLOPs accounting.
+- `compute-skipping/layer-level/layer_skip_stats.py`: Logging utility for layer-level experiments. It saves per-sample denoising-step counts and per-layer skip records in the JSON format used by the analysis scripts.
+- `compute-skipping/layer-level/modeling.py`: Layer-skip-only model variant with the layer-level reuse logic added to the decoder stack. This file was meant to be copy-pasted into the active runtime `modeling.py` when running layer-level skipping experiments, and it isolates only the layer-level skipping modifications.
+
+### `compute-skipping/token-level/`
+
+- `compute-skipping/token-level/token_skip_config.py`: Configuration object for the token-level skipping experiments. It stores the enabled state, threshold or top-k settings, and naming logic for each token-skip run.
+- `compute-skipping/token-level/token_skip_policy.py`: Policy logic for deciding which tokens stay active in a layer. It computes per-token cosine similarity across adjacent denoising steps and builds either threshold-based or top-k active/reuse masks.
+- `compute-skipping/token-level/token_skip_manager.py`: Runtime state manager for token-level skipping. It caches previous-step layer inputs and outputs, builds the active-token reuse plan, and logs the per-layer token counts used in the FLOPs calculation.
+- `compute-skipping/token-level/token_skip_stats.py`: Logging utility for token-level experiments. It saves per-sample denoising-step counts plus per-layer token activity records in the JSON format used by the plotting scripts.
+- `compute-skipping/token-level/modeling.py`: Token-skip-only model variant with the active-token attention and MLP logic added to the decoder stack. This file was meant to be copy-pasted into the active runtime `modeling.py` when running token-level skipping experiments, and it isolates only the token-level skipping modifications.
+
+### `compute-skipping/plotting/`
+
+- `compute-skipping/plotting/plot_accuracy_vs_flops.py`: Final summary plotting script for the compute-skipping experiments. It reads the logged skip statistics and resolved accuracies, computes theoretical FLOPs reduction, and generates the final Accuracy vs FLOPs plot plus the average denoising-steps table.
+
 # Fast-dLLM v2: Efficient Block-Diffusion Large Language Model
 
 [![Project](https://img.shields.io/static/v1?label=Project&message=Github&color=blue&logo=github-pages)](https://nvlabs.github.io/Fast-dLLM/v2)
