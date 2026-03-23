@@ -21,7 +21,6 @@ This file is inspired by the code from https://github.com/ML-GSAI/SMDM
 import accelerate
 import torch
 import re
-from pathlib import Path
 import random
 import numpy as np
 import torch.nn.functional as F
@@ -32,14 +31,18 @@ from lm_eval.api.registry import register_model
 from tqdm import tqdm
 import os
 import sys
-from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
-import json
+from transformers import AutoTokenizer, AutoModelForCausalLM
 import time
 import types
 import generation_functions
 
-from baseline_trace import BaselineTraceRecorder
+# Uncomment these lines if you want to collect the baseline plotting traces again.
+# BASELINE_PLOTTING_DIR = os.path.join(os.path.dirname(__file__), "baseline-plotting")
+# if BASELINE_PLOTTING_DIR not in sys.path:
+#     sys.path.append(BASELINE_PLOTTING_DIR)
+# from baseline_trace import BaselineTraceRecorder
 
+# The skip implementations live in separate folders, so add them explicitly for local imports.
 TOKEN_SKIP_DIR = os.path.join(os.path.dirname(__file__), "compute-skipping", "token-level")
 if TOKEN_SKIP_DIR not in sys.path:
     sys.path.append(TOKEN_SKIP_DIR)
@@ -78,13 +81,13 @@ class Fast_dLLM_v2EvalHarness(LM):
         small_block_size=8,
         bd_size=32,
         threshold=0.9,
-        token_skip_enabled=False,
-        token_skip_mode="threshold",
-        token_skip_threshold=0.99,
-        token_skip_topk_percent=None,
-        layer_skip_enabled=False,
-        layer_skip_aggregation="avg",
-        layer_skip_threshold=0.99,
+        token_skip_enabled=False,  # Turns token-level skipping on or off.
+        token_skip_mode="threshold",  # Chooses threshold-based or top-k token skipping.
+        token_skip_threshold=0.99,  # Sets the cosine threshold for token reuse.
+        token_skip_topk_percent=None,  # Sets the percentage of tokens kept active in top-k mode.
+        layer_skip_enabled=False,  # Turns layer-level skipping on or off.
+        layer_skip_aggregation="avg",  # Chooses how per-token layer similarity is reduced to one score (avg or max).
+        layer_skip_threshold=0.99,  # Sets the layer-level similarity threshold for reuse.
         **kwargs,
     ):
 
@@ -119,12 +122,14 @@ class Fast_dLLM_v2EvalHarness(LM):
             **model_kwargs
         )
         self.model.eval()
+        # Uncomment if you want to save the baseline plotting traces for a run.
         # self.model.trace_recorder = BaselineTraceRecorder(save_dir="baseline_logs_test")
         self.model.skip_stats_recorder = None
         self.model.token_skip_manager = None
         self.model.layer_skip_manager = None
 
         if layer_skip_enabled:
+            # Layer-level runs reuse whole layer outputs when the aggregated similarity is high enough.
             layer_skip_config = LayerSkipConfig(
                 enabled=layer_skip_enabled,
                 aggregation=layer_skip_aggregation,
@@ -137,6 +142,7 @@ class Fast_dLLM_v2EvalHarness(LM):
                 stats_recorder=self.model.skip_stats_recorder,
             )
         else:
+            # Token-level runs either threshold on per-token cosine similarity or keep the top-k changed tokens.
             token_skip_config = TokenSkipConfig(
                 enabled=token_skip_enabled,
                 mode=token_skip_mode,
@@ -150,7 +156,7 @@ class Fast_dLLM_v2EvalHarness(LM):
                 stats_recorder=self.model.skip_stats_recorder,
             )
 
-
+        # Replace the model's sampling entrypoint with the version that knows about tracing and skipping.
         self.model.mdm_sample = types.MethodType(generation_functions.Fast_dLLM_QwenForCausalLM.batch_sample, self.model)
 
         self.device = torch.device(device)

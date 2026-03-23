@@ -1,3 +1,4 @@
+# Implements the per-token similarity rule used to decide which tokens stay active.
 import math
 
 import torch
@@ -6,10 +7,12 @@ import torch.nn.functional as F
 
 class TokenSkipPolicy:
     def __init__(self, config):
+        # Validate the token-skip settings once when the policy is created.
         self.config = config
         self.config.validate()
 
     def token_cosine_similarity(self, current_hidden, prev_hidden):
+        # Compare the current and previous layer inputs token by token.
         current_hidden = current_hidden.float()
         prev_hidden = prev_hidden.float()
         token_cosine = F.cosine_similarity(current_hidden, prev_hidden, dim=-1)
@@ -17,16 +20,17 @@ class TokenSkipPolicy:
         return token_cosine
 
     def build_masks(self, current_hidden, prev_hidden):
+        # Build the active-token and reuse-token masks for one layer-step.
         token_cosine = self.token_cosine_similarity(current_hidden, prev_hidden)
 
         if self.config.mode == "threshold":
-            # Recompute tokens whose similarity is below the threshold
+            # Threshold mode recomputes tokens whose similarity is below the reuse threshold.
             active_mask = token_cosine < self.config.threshold
         else:
             batch_size, num_tokens = token_cosine.shape
             k = max(1, math.ceil(num_tokens * self.config.topk_percent / 100.0))
 
-            # The most changed tokens are the ones with the lowest cosine similarity
+            # Top-k mode keeps the tokens that changed the most.
             changed_score = 1.0 - token_cosine
             topk_indices = torch.topk(changed_score, k=k, dim=-1).indices
 

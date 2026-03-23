@@ -1,3 +1,4 @@
+# Tracks per-sample layer state and applies the layer-level skipping decision during decoding.
 import torch
 
 from layer_skip_policy import LayerSkipPolicy
@@ -5,6 +6,7 @@ from layer_skip_policy import LayerSkipPolicy
 
 class LayerSkipManager:
     def __init__(self, config, stats_recorder=None):
+        # Keep the policy, logger, and previous-step activations needed for layer reuse.
         self.config = config
         self.policy = LayerSkipPolicy(config)
         self.stats_recorder = stats_recorder
@@ -13,10 +15,12 @@ class LayerSkipManager:
         self.prev_layer_output = {}
 
     def start_new_sample(self):
+        # Reset cached activations so each sample starts with a clean layer-skip state.
         self.prev_ln_hidden = {}
         self.prev_layer_output = {}
 
     def _should_skip(self, trace_context):
+        # Only run layer skipping on real decode denoising steps after step 0.
         if not self.config.enabled:
             return False
         if trace_context is None:
@@ -30,6 +34,7 @@ class LayerSkipManager:
         return True
 
     def build_layer_skip_plan(self, layer_idx, ln_hidden, trace_context):
+        # Build the reuse decision for one layer at one denoising step.
         if ln_hidden.shape[0] != 1:
             raise ValueError("Layer skipping currently expects batch_size=1")
 
@@ -41,6 +46,7 @@ class LayerSkipManager:
         prev_ln_hidden = self.prev_ln_hidden.get(key)
         prev_layer_output = self.prev_layer_output.get(key)
 
+        # Fall back to the normal forward path if skipping is disabled or no previous state exists yet.
         if (not self._should_skip(trace_context)) or prev_ln_hidden is None or prev_layer_output is None:
             return {
                 "block_idx": block_idx,
@@ -58,10 +64,12 @@ class LayerSkipManager:
         prev_ln_hidden = prev_ln_hidden.to(device=ln_hidden.device, dtype=ln_hidden.dtype)
         prev_layer_output = prev_layer_output.to(device=ln_hidden.device, dtype=ln_hidden.dtype)
 
+        # Compare the current layer input against the previous denoising step for this same layer.
         decision = self.policy.build_decision(ln_hidden, prev_ln_hidden)
         layer_similarity = decision["layer_similarity"]
         should_reuse_layer = bool(decision["skip_layer"].item())
 
+        # Keep the final decision aligned with the configured threshold rule.
         expected_skip = bool(layer_similarity.item() >= self.config.threshold)
         if expected_skip != should_reuse_layer:
             raise ValueError("Layer skip decision does not match the configured threshold rule")
@@ -80,6 +88,7 @@ class LayerSkipManager:
         }
 
     def finish_layer(self, layer_idx, ln_hidden, layer_output, trace_context, skip_plan):
+        # Store the current layer state for the next denoising step and write one log record.
         key = skip_plan["key"]
 
         self.prev_ln_hidden[key] = ln_hidden.detach().cpu()

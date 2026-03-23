@@ -1,3 +1,4 @@
+# Summarizes the final compute-skipping runs into an accuracy-vs-FLOPs plot and denoising-step tables.
 import argparse
 import csv
 import json
@@ -6,6 +7,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 
 
+# Use one visual style per experiment family so the final figure is easy to scan.
 GROUP_STYLE = {
     "baseline": {
         "legend_label": "Baseline",
@@ -49,6 +51,7 @@ GROUP_STYLE = {
     },
 }
 
+# Hand-tuned label offsets keep the crowded points readable in the final scatter plot.
 ANNOTATION_OFFSET_OVERRIDES = {
     "baseline": (-30, 12),
     "token_threshold_0.995": (-30, 10),
@@ -70,6 +73,7 @@ ANNOTATION_OFFSET_OVERRIDES = {
     "layer_max_0.97": (10, -24),
 }
 
+# Keep the plot, table, and CSV outputs in a stable presentation order.
 SETTING_ORDER = [
     "baseline",
     "token_threshold_0.995",
@@ -91,6 +95,7 @@ SETTING_ORDER = [
     "layer_max_0.97",
 ]
 
+# These model dimensions are used for the theoretical FLOPs calculation.
 DEFAULT_MODEL_SPECS = {
     "hidden_size": 3584,
     "intermediate_size": 18944,
@@ -100,6 +105,7 @@ DEFAULT_MODEL_SPECS = {
 }
 
 
+# Parse the summary file, output paths, and model dimensions used for plotting.
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Plot accuracy vs FLOPs reduction for baseline/token/layer skipping settings."
@@ -153,6 +159,7 @@ def parse_args():
     return parser.parse_args()
 
 
+# Treat blank CSV fields as missing values so they can be filled automatically later.
 def maybe_float(value):
     if value is None:
         return None
@@ -162,6 +169,7 @@ def maybe_float(value):
     return float(text)
 
 
+# Allow the CSV to store either fractions or percentages and normalize them for plotting.
 def to_percent(value):
     if value is None:
         return None
@@ -170,6 +178,7 @@ def to_percent(value):
     return value
 
 
+# Average the per-sample denoising-step totals saved in one log folder.
 def compute_avg_denoising_steps(log_dir):
     if log_dir is None or str(log_dir).strip() == "":
         return None
@@ -188,6 +197,7 @@ def compute_avg_denoising_steps(log_dir):
     return total_steps / len(json_paths)
 
 
+# Convert the grouped-query attention config into the effective K/V projection width.
 def compute_kv_hidden_size(model_specs):
     return (
         model_specs["hidden_size"]
@@ -196,6 +206,7 @@ def compute_kv_hidden_size(model_specs):
     )
 
 
+# Estimate the dominant forward-pass FLOPs for one logged layer-step record.
 def compute_record_flops(record, model_specs):
     hidden_size = model_specs["hidden_size"]
     intermediate_size = model_specs["intermediate_size"]
@@ -232,6 +243,7 @@ def compute_record_flops(record, model_specs):
     )
 
 
+# Sum the theoretical FLOPs over every sample and layer-step in one experiment folder.
 def compute_total_flops(log_dir, model_specs):
     if log_dir is None or str(log_dir).strip() == "":
         return None
@@ -251,6 +263,7 @@ def compute_total_flops(log_dir, model_specs):
     return total_flops
 
 
+# Load the summary CSV and fill in any missing FLOPs or denoising-step values from the logs.
 def load_rows(summary_path, baseline_log_dir, model_specs):
     if not summary_path.exists():
         template_path = summary_path.with_name("overall_results_template.csv")
@@ -320,11 +333,13 @@ def load_rows(summary_path, baseline_log_dir, model_specs):
     return rows, skipped_settings
 
 
+# Draw the final accuracy-vs-FLOPs scatter plot using the resolved experiment rows.
 def make_plot(rows, output_path, title):
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     fig, ax = plt.subplots(figsize=(10.5, 6.3))
 
+    # Plot each experiment family separately so the legend matches the marker/color scheme.
     for group_name, style in GROUP_STYLE.items():
         group_rows = [row for row in rows if row["group"] == group_name]
         if not group_rows:
@@ -346,6 +361,7 @@ def make_plot(rows, output_path, title):
             zorder=style.get("zorder", 3),
         )
 
+        # Add the setting labels after the markers so each threshold or top-k value stays visible.
         for row in group_rows:
             dx, dy = ANNOTATION_OFFSET_OVERRIDES.get(
                 row["setting_id"], style["annotation_offset"]
@@ -409,6 +425,7 @@ def make_plot(rows, output_path, title):
     plt.close(fig)
 
 
+# Render a compact paper-style PNG table for the average denoising-step summary.
 def make_table(rows, output_path):
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -479,6 +496,7 @@ def make_table(rows, output_path):
     plt.close(fig)
 
 
+# Save the fully resolved metrics so the final numbers can be reused outside this script.
 def save_resolved_csv(rows, output_path):
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = [
@@ -511,6 +529,7 @@ def save_resolved_csv(rows, output_path):
             )
 
 
+# Export the denoising-step summary as a small LaTeX table for the report.
 def save_latex_table(rows, output_path):
     output_path.parent.mkdir(parents=True, exist_ok=True)
     lines = [
@@ -540,6 +559,7 @@ def save_latex_table(rows, output_path):
     output_path.write_text("\n".join(lines))
 
 
+# Build the resolved metrics once, then emit the plot and both table formats.
 def main():
     args = parse_args()
     model_specs = {

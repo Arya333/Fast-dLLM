@@ -1,3 +1,4 @@
+# Defines the run-time configuration used by the layer-level skipping experiments.
 from dataclasses import dataclass
 
 
@@ -8,6 +9,7 @@ class LayerSkipConfig:
     threshold: float = 0.99
 
     def validate(self):
+        # Keep the public layer-skip settings in the small range supported by the experiments.
         if self.aggregation not in {"avg", "max"}:
             raise ValueError("aggregation must be 'avg' or 'max'")
 
@@ -15,6 +17,7 @@ class LayerSkipConfig:
             raise ValueError("threshold must be between 0 and 1")
 
     def setting_name(self):
+        # Match each configuration to the log-folder name used by evaluation and plotting.
         if not self.enabled:
             return "baseline"
         return f"layer_{self.aggregation}_{self.threshold}"

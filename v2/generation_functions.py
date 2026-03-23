@@ -1,7 +1,6 @@
-from typing import Callable, Optional, Union
 import torch
 import types
-from transformers.utils import auto_docstring, logging
+from transformers.utils import auto_docstring
 
 # Constants for Fast_dLLM model
 FAST_DLLM_MASK_ID = 151665
@@ -33,6 +32,7 @@ class Fast_dLLM_QwenForCausalLM:
         num_blocks = max_new_tokens // block_size + seq_len.max().item() // block_size
         batch_size = input_ids.shape[0]
 
+        # Start a fresh recorder state for this sample before denoising begins.
         trace_recorder = getattr(self, "trace_recorder", None)
         if trace_recorder is not None:
             if batch_size != 1:
@@ -55,6 +55,7 @@ class Fast_dLLM_QwenForCausalLM:
         if active_skip_manager is not None:
             if batch_size != 1:
                 raise ValueError("Use batch_size=1 while running compute skipping")
+            # Token-level and layer-level skipping both keep per-sample state across denoising steps.
             active_skip_manager.start_new_sample()
 
 
@@ -139,6 +140,7 @@ class Fast_dLLM_QwenForCausalLM:
                             # logits = self.forward(input_ids=x_t[:, -block_size:], use_cache=True, past_key_values=past_key_values, update_past_key_values=False).logits
                             # logits = torch.cat([logits[:, :1, :], logits[:, :-1, :]], dim=1)
                             # logits = logits[:, start:end]
+                            # Pass the same decode-step context into tracing and compute skipping.
                             forward_kwargs = {
                                 "input_ids": x_t[:, -block_size:],
                                 "use_cache": True,
@@ -225,6 +227,7 @@ class Fast_dLLM_QwenForCausalLM:
             trace_recorder.save_current_sample()
         
         if skip_stats_recorder is not None:
+            # The final summary table uses the average denoising steps saved here.
             skip_stats_recorder.set_sample_total_denoising_steps(total_denoising_steps)
             skip_stats_recorder.save_current_sample()
 

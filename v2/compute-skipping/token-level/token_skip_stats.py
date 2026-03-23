@@ -1,9 +1,11 @@
+# Saves the per-token skip statistics that are used for FLOPs calculation and summary tables.
 import json
 import os
 
 
 class TokenSkipStatsRecorder:
     def __init__(self, save_dir="compute-skipping/logs"):
+        # Keep one log folder and one in-memory record buffer for the current sample.
         self.save_dir = save_dir
         os.makedirs(self.save_dir, exist_ok=True)
 
@@ -15,6 +17,7 @@ class TokenSkipStatsRecorder:
         self.layer_step_records = []
 
     def start_new_sample(self, prompt_len):
+        # Reset the recorder so each sample is written to its own JSON file.
         self.sample_idx = self.next_sample_idx
         self.next_sample_idx += 1
         self.prompt_len = int(prompt_len)
@@ -23,8 +26,9 @@ class TokenSkipStatsRecorder:
         self.layer_step_records = []
 
     def set_sample_total_denoising_steps(self, total_denoising_steps):
+        # Save the outer decode-step count used later in the summary table.
         self.current_sample_total_denoising_steps = int(total_denoising_steps)
-    
+
     def record_layer_step(
         self,
         block_idx,
@@ -36,6 +40,7 @@ class TokenSkipStatsRecorder:
         active_mask=None,
         threshold=None,
     ):
+        # Save one layer-step record with the active-token counts and cosine summaries.
         record = {
             "block_idx": int(block_idx),
             "step_idx": int(step_idx),
@@ -62,6 +67,7 @@ class TokenSkipStatsRecorder:
         self.layer_step_records.append(record)
 
     def save_current_sample(self):
+        # Write the completed sample summary in the format expected by the plotting scripts.
         out_path = os.path.join(self.save_dir, f"sample_{self.sample_idx:04d}.json")
         with open(out_path, "w") as f:
             json.dump(

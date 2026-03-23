@@ -1,3 +1,4 @@
+# Defines the run-time configuration used by the token-level skipping experiments.
 from dataclasses import dataclass
 from typing import Optional
 
@@ -10,6 +11,7 @@ class TokenSkipConfig:
     topk_percent: Optional[float] = None
 
     def validate(self):
+        # Keep the public token-skip settings aligned with the two experiment families.
         if self.mode not in {"threshold", "topk"}:
             raise ValueError("mode must be 'threshold' or 'topk'")
 
@@ -24,6 +26,7 @@ class TokenSkipConfig:
                 raise ValueError("topk_percent must be in (0, 100]")
 
     def setting_name(self):
+        # Match each token-skip configuration to the log-folder name used by evaluation and plotting.
         if not self.enabled:
             return "baseline"
         if self.mode == "threshold":

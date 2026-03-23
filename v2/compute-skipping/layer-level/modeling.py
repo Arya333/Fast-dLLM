@@ -1,3 +1,4 @@
+# This file contains the layer-level skipping model variant used for the compute-skipping experiments.
 from typing import Callable, Optional, Union
 from dataclasses import dataclass
 
@@ -105,7 +106,7 @@ class Fast_dLLM_QwenMLP(nn.Module):
         self.act_fn = ACT2FN[config.hidden_act]
 
     def forward(self, x, return_temp=False):
-        # temp is the FFN intermediate before the final down projection
+        # Keep the optional FFN intermediate because the layer-level experiments still reuse the baseline tracing hooks.
         temp = self.act_fn(self.gate_proj(x)) * self.up_proj(x)
         down_proj = self.down_proj(temp)
 
@@ -148,12 +149,6 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
     k_embed = (k * cos) + (rotate_half(k) * sin)
     return q_embed, k_embed
 
-def apply_rotary_pos_emb_single(x, cos, sin, unsqueeze_dim=1):
-    # Same rotary embedding math, but for one tensor at a time
-    cos = cos.unsqueeze(unsqueeze_dim)
-    sin = sin.unsqueeze(unsqueeze_dim)
-    return (x * cos) + (rotate_half(x) * sin)
-
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     """
     This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
@@ -183,83 +178,6 @@ class Fast_dLLM_QwenAttention(nn.Module):
         self.v_proj = nn.Linear(config.hidden_size, config.num_key_value_heads * self.head_dim, bias=True)
         self.o_proj = nn.Linear(config.num_attention_heads * self.head_dim, config.hidden_size, bias=False)
         self.sliding_window = config.sliding_window if config.layer_types[layer_idx] == "sliding_attention" else None
-
-    def forward_active_queries(
-        self,
-        hidden_states: torch.Tensor,
-        active_token_indices: torch.LongTensor,
-        position_embeddings: tuple[torch.Tensor, torch.Tensor],
-        attention_mask: Optional[torch.Tensor],
-        past_key_value: Optional[Cache] = None,
-        cache_position: Optional[torch.LongTensor] = None,
-        update_past_key_values: Optional[bool] = False,
-        block_past_key_values: Optional[Cache] = None,
-        replace_position: Optional[int] = None,
-        **kwargs,
-    ):
-        # For token skipping, we only recompute attention outputs for active query tokens
-        if hidden_states.shape[0] != 1:
-            raise ValueError("Token skipping currently expects batch_size=1")
-
-        if block_past_key_values is not None:
-            raise NotImplementedError("Token skipping currently only supports use_block_cache=False")
-
-        if active_token_indices.numel() == 0:
-            return hidden_states.new_empty((1, 0, self.config.hidden_size))
-
-        full_input_shape = hidden_states.shape[:-1]
-        active_hidden_states = hidden_states[:, active_token_indices, :]
-        active_input_shape = active_hidden_states.shape[:-1]
-
-        full_hidden_shape = (*full_input_shape, -1, self.head_dim)
-        active_hidden_shape = (*active_input_shape, -1, self.head_dim)
-
-        # Query is computed only for active tokens
-        query_states = self.q_proj(active_hidden_states).view(active_hidden_shape).transpose(1, 2)
-
-        # Keys and values still cover the full sequence so active tokens can attend to all tokens
-        key_states = self.k_proj(hidden_states).view(full_hidden_shape).transpose(1, 2)
-        value_states = self.v_proj(hidden_states).view(full_hidden_shape).transpose(1, 2)
-
-        cos, sin = position_embeddings
-
-        query_states = apply_rotary_pos_emb_single(
-            query_states,
-            cos[:, active_token_indices, :],
-            sin[:, active_token_indices, :],
-        )
-        key_states = apply_rotary_pos_emb_single(key_states, cos, sin)
-
-        if past_key_value is not None:
-            if update_past_key_values:
-                raise NotImplementedError("Token skipping only supports the decode denoising path")
-            elif len(past_key_value) > self.layer_idx:
-                key_states = torch.cat((past_key_value[self.layer_idx][0], key_states), dim=-2)
-                value_states = torch.cat((past_key_value[self.layer_idx][1], value_states), dim=-2)
-
-        active_attention_mask = attention_mask
-        if attention_mask is not None:
-            if attention_mask.dim() != 2:
-                raise NotImplementedError("Token skipping currently expects the 2D eval attention mask")
-            active_attention_mask = attention_mask[active_token_indices]
-
-        attention_interface = ALL_ATTENTION_FUNCTIONS["sdpa"]
-        attn_output, _ = attention_interface(
-            self,
-            query_states,
-            key_states,
-            value_states,
-            active_attention_mask,
-            is_causal=False,
-            dropout=0.0 if not self.training else self.attention_dropout,
-            scaling=self.scaling,
-            sliding_window=self.sliding_window,
-            **kwargs,
-        )
-
-        attn_output = attn_output.reshape(*active_input_shape, -1).contiguous()
-        attn_output = self.o_proj(attn_output)
-        return attn_output
 
     def forward(
         self,
@@ -326,27 +244,7 @@ class Fast_dLLM_QwenAttention(nn.Module):
         else:
             attention_interface = ALL_ATTENTION_FUNCTIONS["sdpa"]
 
-            # attn_output, attn_weights = attention_interface(
-            #     self,
-            #     query_states,
-            #     key_states,
-            #     value_states,
-            #     attention_mask,
-            #     is_causal=False,
-            #     dropout=0.0 if not self.training else self.attention_dropout,
-            #     scaling=self.scaling,
-            #     sliding_window=self.sliding_window,  # main diff with Llama
-            #     **kwargs,
-            # )
-
-            # if trace_recorder is not None:
-            #     trace_recorder.record_attn_weights(
-            #         layer_idx=self.layer_idx,
-            #         attn_weights=attn_weights,
-            #         trace_context=trace_context,
-            #     )
-
-            # Assignment's attention-weight computation for logging
+            # Keep the baseline attention-weight logging path for the plotting experiments.
             attn_weight_for_log = None
             if trace_recorder is not None:
                 key_states_for_log = key_states
@@ -373,18 +271,6 @@ class Fast_dLLM_QwenAttention(nn.Module):
                 sliding_window=self.sliding_window,  # main diff with Llama
                 **kwargs,
             )
-
-            # if trace_recorder is not None:
-            #     trace_recorder.record_attn_weights(
-            #         layer_idx=self.layer_idx,
-            #         attn_weights=attn_weight_for_log,
-            #         trace_context=trace_context,
-            #     )
-            #     trace_recorder.record_attn_weight_range(
-            #         layer_idx=self.layer_idx,
-            #         attn_weights=attn_weight_for_log,
-            #         trace_context=trace_context,
-            #     )
 
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)
@@ -438,10 +324,11 @@ class Fast_dLLM_QwenDecoderLayer(GradientCheckpointingLayer):
         replace_position: Optional[int] = None,
         trace_recorder=None,
         trace_context=None,
-        layer_skip_manager=None,
+        layer_skip_manager=None,  # Controls whole-layer reuse during layer-level skipping.
         **kwargs
     ) -> tuple[torch.Tensor]:
         residual = hidden_states
+        # Layer-level skipping compares the current layer input after RMSNorm against the previous denoising step.
         ln_hidden_states = self.input_layernorm(hidden_states)
 
         if layer_skip_manager is not None:
@@ -454,6 +341,7 @@ class Fast_dLLM_QwenDecoderLayer(GradientCheckpointingLayer):
             skip_plan = None
 
         if skip_plan is not None and skip_plan["did_skip"]:
+            # Reuse the previous full layer output when the layer-level similarity is high enough.
             hidden_states = skip_plan["prev_layer_output"].clone().to(
                 device=residual.device,
                 dtype=residual.dtype,
@@ -467,7 +355,7 @@ class Fast_dLLM_QwenDecoderLayer(GradientCheckpointingLayer):
             )
             return hidden_states
 
-        # Normal full-token path
+        # Fall back to the normal full-layer computation when the layer should not be skipped.
         attn_output = self.self_attn(
             hidden_states=ln_hidden_states,
             attention_mask=attention_mask,
@@ -503,6 +391,7 @@ class Fast_dLLM_QwenDecoderLayer(GradientCheckpointingLayer):
         hidden_states = residual + ffn_output
 
         if layer_skip_manager is not None:
+            # Save the current layer state so the next denoising step can decide whether to reuse it.
             hidden_states = layer_skip_manager.finish_layer(
                 layer_idx=self.self_attn.layer_idx,
                 ln_hidden=ln_hidden_states,
@@ -640,7 +529,7 @@ class Fast_dLLM_QwenModel(Fast_dLLM_QwenPreTrainedModel):
         replace_position: Optional[int] = None,
         trace_recorder=None,
         trace_context=None,
-        layer_skip_manager=None,
+        layer_skip_manager=None,  # Thread the layer-level skip controller through every decoder layer.
         **kwargs
     ) -> BaseModelOutputWithPast:
         if (input_ids is None) ^ (inputs_embeds is not None):
@@ -689,6 +578,7 @@ class Fast_dLLM_QwenModel(Fast_dLLM_QwenPreTrainedModel):
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
         for decoder_layer in self.layers[: self.config.num_hidden_layers]:
+            # Each decoder layer receives the shared layer-skip manager so reuse decisions stay aligned by step and layer.
             hidden_states = decoder_layer(
                 hidden_states,
                 attention_mask=attention_mask,
@@ -767,7 +657,7 @@ class Fast_dLLM_QwenForCausalLM(Fast_dLLM_QwenPreTrainedModel, GenerationMixin):
         mask_id: Optional[int] = 151665,
         trace_recorder=None,
         trace_context=None,
-        layer_skip_manager=None,
+        layer_skip_manager=None,  # Lets the top-level model forward enable whole-layer reuse during decoding.
         **kwargs
     ) -> CausalLMOutputWithPastAndBlockCache:
 
@@ -806,6 +696,7 @@ class Fast_dLLM_QwenForCausalLM(Fast_dLLM_QwenPreTrainedModel, GenerationMixin):
             input_ids = torch.cat([input_ids, complementary_input_ids], dim=0)
             labels = torch.cat([labels, complementary_labels], dim=0)
 
+        # Pass the layer-level skip controller into the decoder stack during evaluation.
         outputs: BaseModelOutputWithPastAndBlockCache = self.model(
             input_ids=input_ids,
             labels=labels,

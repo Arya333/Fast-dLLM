@@ -1,9 +1,9 @@
-from typing import Callable, Optional, Union
+# This file contains the token-level skipping model variant used for the compute-skipping experiments.
+from typing import Optional, Union
 from dataclasses import dataclass
 
 import torch
 from torch import nn
-import torch.nn.functional as F
 from functools import partial
 
 from transformers.generation.utils import GenerateDecoderOnlyOutput  
@@ -20,12 +20,9 @@ from transformers.modeling_outputs import (
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from transformers.processing_utils import Unpack
-from transformers.utils import auto_docstring, can_return_tuple, logging
+from transformers.utils import can_return_tuple
 from .configuration import Fast_dLLM_QwenConfig
 from torch.nn.attention.flex_attention import flex_attention, create_block_mask
-from einops import rearrange, repeat
-
-logger = logging.get_logger(__name__)
 
 
 @dataclass
@@ -104,15 +101,10 @@ class Fast_dLLM_QwenMLP(nn.Module):
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
         self.act_fn = ACT2FN[config.hidden_act]
 
-    def forward(self, x, return_temp=False):
-        # temp is the FFN intermediate before the final down projection
+    def forward(self, x):
+        # Apply the full MLP update for the tokens that are still active.
         temp = self.act_fn(self.gate_proj(x)) * self.up_proj(x)
-        down_proj = self.down_proj(temp)
-
-        if return_temp:
-            return down_proj, temp
-
-        return down_proj
+        return self.down_proj(temp)
 
 
 def rotate_half(x):
@@ -154,18 +146,6 @@ def apply_rotary_pos_emb_single(x, cos, sin, unsqueeze_dim=1):
     sin = sin.unsqueeze(unsqueeze_dim)
     return (x * cos) + (rotate_half(x) * sin)
 
-def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """
-    This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
-    num_key_value_heads, seqlen, head_dim) to (batch, num_attention_heads, seqlen, head_dim)
-    """
-    batch, num_key_value_heads, slen, head_dim = hidden_states.shape
-    if n_rep == 1:
-        return hidden_states
-    hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
-    return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
-
-
 class Fast_dLLM_QwenAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
@@ -197,7 +177,7 @@ class Fast_dLLM_QwenAttention(nn.Module):
         replace_position: Optional[int] = None,
         **kwargs,
     ):
-        # For token skipping, we only recompute attention outputs for active query tokens
+        # Recompute attention only for the tokens that stayed active under token-level skipping.
         if hidden_states.shape[0] != 1:
             raise ValueError("Token skipping currently expects batch_size=1")
 
@@ -214,15 +194,14 @@ class Fast_dLLM_QwenAttention(nn.Module):
         full_hidden_shape = (*full_input_shape, -1, self.head_dim)
         active_hidden_shape = (*active_input_shape, -1, self.head_dim)
 
-        # Query is computed only for active tokens
+        # Query is computed only for the active tokens, while keys and values still cover the full block.
         query_states = self.q_proj(active_hidden_states).view(active_hidden_shape).transpose(1, 2)
-
-        # Keys and values still cover the full sequence so active tokens can attend to all tokens
         key_states = self.k_proj(hidden_states).view(full_hidden_shape).transpose(1, 2)
         value_states = self.v_proj(hidden_states).view(full_hidden_shape).transpose(1, 2)
 
         cos, sin = position_embeddings
 
+        # Apply RoPE to the active queries and the full key set before attention.
         query_states = apply_rotary_pos_emb_single(
             query_states,
             cos[:, active_token_indices, :],
@@ -241,6 +220,7 @@ class Fast_dLLM_QwenAttention(nn.Module):
         if attention_mask is not None:
             if attention_mask.dim() != 2:
                 raise NotImplementedError("Token skipping currently expects the 2D eval attention mask")
+            # Restrict the evaluation mask to the active query positions.
             active_attention_mask = attention_mask[active_token_indices]
 
         attention_interface = ALL_ATTENTION_FUNCTIONS["sdpa"]
@@ -257,6 +237,7 @@ class Fast_dLLM_QwenAttention(nn.Module):
             **kwargs,
         )
 
+        # Scatter-ready attention output for just the active tokens.
         attn_output = attn_output.reshape(*active_input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)
         return attn_output
@@ -271,8 +252,6 @@ class Fast_dLLM_QwenAttention(nn.Module):
         update_past_key_values: Optional[bool] = False,
         block_past_key_values: Optional[Cache] = None,
         replace_position: Optional[int] = None,
-        trace_recorder=None,
-        trace_context=None,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[tuple[torch.Tensor]]]:
         input_shape = hidden_states.shape[:-1]
@@ -283,14 +262,11 @@ class Fast_dLLM_QwenAttention(nn.Module):
         value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
 
         cos, sin = position_embeddings
-        # query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
         if self.training:
-            #split q into two parts
-            q_1 = query_states[:,:,:query_states.shape[2]//2]
-            q_2 = query_states[:,:,query_states.shape[2]//2:]
-            #split k into two parts
-            k_1 = key_states[:,:,:key_states.shape[2]//2]
-            k_2 = key_states[:,:,key_states.shape[2]//2:]
+            q_1 = query_states[:, :, : query_states.shape[2] // 2]
+            q_2 = query_states[:, :, query_states.shape[2] // 2 :]
+            k_1 = key_states[:, :, : key_states.shape[2] // 2]
+            k_2 = key_states[:, :, key_states.shape[2] // 2 :]
             q_1, k_1 = apply_rotary_pos_emb(q_1, k_1, cos, sin)
             q_2, k_2 = apply_rotary_pos_emb(q_2, k_2, cos, sin)
             query_states = torch.cat((q_1, q_2), dim=-2)
@@ -305,14 +281,13 @@ class Fast_dLLM_QwenAttention(nn.Module):
             else:
                 block_cache_key_states = block_past_key_values[self.layer_idx][0]
                 block_cache_value_states = block_past_key_values[self.layer_idx][1]
-                
-                block_cache_key_states[:, :, replace_position:replace_position+key_states.shape[2]] = key_states
-                block_cache_value_states[:, :, replace_position:replace_position+value_states.shape[2]] = value_states
+
+                block_cache_key_states[:, :, replace_position : replace_position + key_states.shape[2]] = key_states
+                block_cache_value_states[:, :, replace_position : replace_position + value_states.shape[2]] = value_states
                 key_states = block_cache_key_states
                 value_states = block_cache_value_states
 
         if past_key_value is not None:
-            # sin and cos are specific to RoPE models; cache_position needed for the static cache
             if update_past_key_values:
                 cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
                 key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
@@ -320,47 +295,12 @@ class Fast_dLLM_QwenAttention(nn.Module):
                 key_states = torch.cat((past_key_value[self.layer_idx][0], key_states), dim=-2)
                 value_states = torch.cat((past_key_value[self.layer_idx][1], value_states), dim=-2)
 
+        # The full-token path matches the base model and is used whenever the whole layer stays active.
         if self.training:
             attn_output = fused_flex_attention(query_states, key_states, value_states, mask=attention_mask)
             attn_output = attn_output.transpose(1, 2).contiguous()
         else:
             attention_interface = ALL_ATTENTION_FUNCTIONS["sdpa"]
-
-            # attn_output, attn_weights = attention_interface(
-            #     self,
-            #     query_states,
-            #     key_states,
-            #     value_states,
-            #     attention_mask,
-            #     is_causal=False,
-            #     dropout=0.0 if not self.training else self.attention_dropout,
-            #     scaling=self.scaling,
-            #     sliding_window=self.sliding_window,  # main diff with Llama
-            #     **kwargs,
-            # )
-
-            # if trace_recorder is not None:
-            #     trace_recorder.record_attn_weights(
-            #         layer_idx=self.layer_idx,
-            #         attn_weights=attn_weights,
-            #         trace_context=trace_context,
-            #     )
-
-            # Assignment's attention-weight computation for logging
-            attn_weight_for_log = None
-            if trace_recorder is not None:
-                key_states_for_log = key_states
-                if key_states_for_log.shape[1] != query_states.shape[1]:
-                    key_states_for_log = repeat_kv(key_states_for_log, self.num_key_value_groups)
-
-                attn_scores_for_log = torch.matmul(
-                    query_states.float(),
-                    key_states_for_log.float().transpose(2, 3),
-                )
-                attn_scores_for_log = attn_scores_for_log * self.scaling
-                # attn_scores_for_log = attn_scores_for_log - attn_scores_for_log.amax(dim=-1, keepdim=True) # doing this so that exp doesn't lead to NaNs (numbers being too large)
-                attn_weight_for_log = torch.exp(attn_scores_for_log)
-
             attn_output, _ = attention_interface(
                 self,
                 query_states,
@@ -370,21 +310,9 @@ class Fast_dLLM_QwenAttention(nn.Module):
                 is_causal=False,
                 dropout=0.0 if not self.training else self.attention_dropout,
                 scaling=self.scaling,
-                sliding_window=self.sliding_window,  # main diff with Llama
+                sliding_window=self.sliding_window,
                 **kwargs,
             )
-
-            # if trace_recorder is not None:
-            #     trace_recorder.record_attn_weights(
-            #         layer_idx=self.layer_idx,
-            #         attn_weights=attn_weight_for_log,
-            #         trace_context=trace_context,
-            #     )
-            #     trace_recorder.record_attn_weight_range(
-            #         layer_idx=self.layer_idx,
-            #         attn_weights=attn_weight_for_log,
-            #         trace_context=trace_context,
-            #     )
 
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)
@@ -431,17 +359,17 @@ class Fast_dLLM_QwenDecoderLayer(GradientCheckpointingLayer):
         past_key_value: Optional[Cache] = None,
         use_cache: Optional[bool] = False,
         cache_position: Optional[torch.LongTensor] = None,
-        position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,  # necessary, but kept here for BC
+        position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
         update_past_key_values: Optional[bool] = False,
         use_block_cache: Optional[bool] = False,
         block_past_key_values: Optional[Cache] = None,
         replace_position: Optional[int] = None,
-        trace_recorder=None,
         trace_context=None,
         token_skip_manager=None,
-        **kwargs
+        **kwargs,
     ) -> tuple[torch.Tensor]:
         residual = hidden_states
+        # Token skipping compares the current post-norm layer input against the previous denoising step.
         ln_hidden_states = self.input_layernorm(hidden_states)
 
         if token_skip_manager is not None:
@@ -459,7 +387,7 @@ class Fast_dLLM_QwenDecoderLayer(GradientCheckpointingLayer):
             and skip_plan["num_active_tokens"] < skip_plan["num_total_tokens"]
         )
 
-        # Skip path
+        # Recompute only the active tokens and reuse the previous layer output everywhere else.
         if run_active_only:
             active_token_indices = skip_plan["active_mask"][0].nonzero(as_tuple=False).squeeze(-1)
 
@@ -479,7 +407,7 @@ class Fast_dLLM_QwenDecoderLayer(GradientCheckpointingLayer):
                 **kwargs,
             )
 
-            # Start from the previous layer output and overwrite only active positions
+            # Start from the previous layer output and overwrite only the active token positions.
             hidden_states = skip_plan["prev_layer_output"].clone().to(
                 device=residual.device,
                 dtype=residual.dtype,
@@ -487,12 +415,14 @@ class Fast_dLLM_QwenDecoderLayer(GradientCheckpointingLayer):
 
             active_hidden_states = residual[:, active_token_indices, :] + active_attn_output
 
+            # The MLP is also evaluated only on the active tokens.
             active_post_attn = self.post_attention_layernorm(active_hidden_states)
             ffn_output = self.mlp(active_post_attn)
 
             active_layer_output = active_hidden_states + ffn_output
             hidden_states[:, active_token_indices, :] = active_layer_output
 
+            # Save the refreshed layer state for the next denoising step.
             hidden_states = token_skip_manager.finish_layer(
                 layer_idx=self.self_attn.layer_idx,
                 ln_hidden=ln_hidden_states,
@@ -502,7 +432,7 @@ class Fast_dLLM_QwenDecoderLayer(GradientCheckpointingLayer):
             )
             return hidden_states
 
-        # Normal full-token path
+        # Fall back to the normal full-layer path when every token stays active.
         attn_output = self.self_attn(
             hidden_states=ln_hidden_states,
             attention_mask=attention_mask,
@@ -515,8 +445,6 @@ class Fast_dLLM_QwenDecoderLayer(GradientCheckpointingLayer):
             use_block_cache=use_block_cache,
             block_past_key_values=block_past_key_values,
             replace_position=replace_position,
-            trace_recorder=trace_recorder,
-            trace_context=trace_context,
             **kwargs,
         )
 
@@ -524,20 +452,11 @@ class Fast_dLLM_QwenDecoderLayer(GradientCheckpointingLayer):
 
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
-
-        if trace_recorder is not None:
-            ffn_output, ffn_temp = self.mlp(hidden_states, return_temp=True)
-            trace_recorder.record_ffn_temp(
-                layer_idx=self.self_attn.layer_idx,
-                ffn_temp=ffn_temp,
-                trace_context=trace_context,
-            )
-        else:
-            ffn_output = self.mlp(hidden_states)
-
+        ffn_output = self.mlp(hidden_states)
         hidden_states = residual + ffn_output
 
         if token_skip_manager is not None:
+            # Save the full-layer output so later denoising steps can reuse it.
             hidden_states = token_skip_manager.finish_layer(
                 layer_idx=self.self_attn.layer_idx,
                 ln_hidden=ln_hidden_states,
@@ -547,70 +466,6 @@ class Fast_dLLM_QwenDecoderLayer(GradientCheckpointingLayer):
             )
 
         return hidden_states
-
-        
-        '''
-        # OLD - NO SKIPPING:
-        residual = hidden_states
-        hidden_states = self.input_layernorm(hidden_states)
-
-        # if trace_recorder is not None:
-        #     trace_recorder.record_ln_hidden(
-        #         layer_idx=self.self_attn.layer_idx,
-        #         ln_hidden=hidden_states,
-        #         trace_context=trace_context,
-        #     )
-
-        # Self Attention
-        attn_output = self.self_attn(
-            hidden_states=hidden_states,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            past_key_value=past_key_value,
-            use_cache=use_cache,
-            cache_position=cache_position,
-            position_embeddings=position_embeddings,
-            update_past_key_values=update_past_key_values,
-            use_block_cache=use_block_cache,
-            block_past_key_values=block_past_key_values,
-            replace_position=replace_position,
-            trace_recorder=trace_recorder,
-            trace_context=trace_context,
-            **kwargs,
-        )
-
-        # if trace_recorder is not None:
-        #     trace_recorder.record_attn_output(
-        #         layer_idx=self.self_attn.layer_idx,
-        #         attn_output=attn_output,
-        #         trace_context=trace_context,
-        #     )
-
-        hidden_states = residual + attn_output
-
-        # Fully Connected
-        residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        if trace_recorder is not None:
-            ffn_output, ffn_temp = self.mlp(hidden_states, return_temp=True)
-            trace_recorder.record_ffn_temp(
-                layer_idx=self.self_attn.layer_idx,
-                ffn_temp=ffn_temp,
-                trace_context=trace_context,
-            )
-        else:
-            ffn_output = self.mlp(hidden_states)
-
-        # if trace_recorder is not None:
-        #     trace_recorder.record_ffn_output(
-        #         layer_idx=self.self_attn.layer_idx,
-        #         ffn_output=ffn_output,
-        #         trace_context=trace_context,
-        #     )
-
-        hidden_states = residual + ffn_output
-        return hidden_states
-        '''
 
 
 class Fast_dLLM_QwenPreTrainedModel(PreTrainedModel):
@@ -737,7 +592,6 @@ class Fast_dLLM_QwenModel(Fast_dLLM_QwenPreTrainedModel):
         use_block_cache: Optional[bool] = False,
         block_past_key_values: Optional[Cache] = None,
         replace_position: Optional[int] = None,
-        trace_recorder=None,
         trace_context=None,
         token_skip_manager=None,
         **kwargs
@@ -787,6 +641,7 @@ class Fast_dLLM_QwenModel(Fast_dLLM_QwenPreTrainedModel):
         # create position embeddings to be shared across the decoder layers
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
+        # Pass the token-skip manager through the decoder stack so each layer can decide when to reuse tokens.
         for decoder_layer in self.layers[: self.config.num_hidden_layers]:
             hidden_states = decoder_layer(
                 hidden_states,
@@ -800,7 +655,6 @@ class Fast_dLLM_QwenModel(Fast_dLLM_QwenPreTrainedModel):
                 use_block_cache=use_block_cache,
                 block_past_key_values=block_past_key_values,
                 replace_position=replace_position,
-                trace_recorder=trace_recorder,
                 trace_context=trace_context,
                 token_skip_manager=token_skip_manager,
                 **kwargs,
@@ -864,7 +718,6 @@ class Fast_dLLM_QwenForCausalLM(Fast_dLLM_QwenPreTrainedModel, GenerationMixin):
         block_past_key_values: Optional[Cache] = None,
         replace_position: Optional[int] = None,
         mask_id: Optional[int] = 151665,
-        trace_recorder=None,
         trace_context=None,
         token_skip_manager=None,
         **kwargs
@@ -905,6 +758,7 @@ class Fast_dLLM_QwenForCausalLM(Fast_dLLM_QwenPreTrainedModel, GenerationMixin):
             input_ids = torch.cat([input_ids, complementary_input_ids], dim=0)
             labels = torch.cat([labels, complementary_labels], dim=0)
 
+        # Forward the decode-time skip context into the decoder so token reuse can happen inside each layer.
         outputs: BaseModelOutputWithPastAndBlockCache = self.model(
             input_ids=input_ids,
             labels=labels,
@@ -919,7 +773,6 @@ class Fast_dLLM_QwenForCausalLM(Fast_dLLM_QwenPreTrainedModel, GenerationMixin):
             use_block_cache=use_block_cache,
             block_past_key_values=block_past_key_values,
             replace_position=replace_position,
-            trace_recorder=trace_recorder,
             trace_context=trace_context,
             token_skip_manager=token_skip_manager,
             **kwargs,
