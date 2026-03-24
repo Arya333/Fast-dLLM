@@ -62,6 +62,109 @@ v2/
 
 - `compute-skipping/plotting/plot_accuracy_vs_flops.py`: Final summary plotting script for the compute-skipping experiments. It reads the logged skip statistics and resolved accuracies, computes theoretical FLOPs reduction, and generates the final Accuracy vs FLOPs plot plus the average denoising-steps table.
 
+## How to Run the Added Experiment Code
+
+### 1. Pick the active `modeling.py` variant
+
+Only one experiment variant should be active at a time. Before running a baseline-trace, token-level, or layer-level experiment, copy the matching variant into the Hugging Face runtime `modeling.py` that is loaded for `Efficient-Large-Model/Fast_dLLM_v2_7B`.
+
+```bash
+# Token-level skipping
+cp compute-skipping/token-level/modeling.py ~/.cache/huggingface/modules/transformers_modules/Efficient-Large-Model/Fast_dLLM_v2_7B/<cache-id>/modeling.py
+
+# Layer-level skipping
+cp compute-skipping/layer-level/modeling.py ~/.cache/huggingface/modules/transformers_modules/Efficient-Large-Model/Fast_dLLM_v2_7B/<cache-id>/modeling.py
+
+# Baseline trace collection
+cp baseline-plotting/modeling.py ~/.cache/huggingface/modules/transformers_modules/Efficient-Large-Model/Fast_dLLM_v2_7B/<cache-id>/modeling.py
+```
+
+Replace `<cache-id>` with the local Hugging Face module folder on your machine. `eval.py` already contains the token-level and layer-level manager wiring, so the main thing you need to switch manually is the active runtime `modeling.py`.
+
+### 2. Common setup
+
+Run commands from the repo root and enable the evaluation dependencies first:
+
+```bash
+export HF_ALLOW_CODE_EVAL=1
+export HF_DATASETS_TRUST_REMOTE_CODE=true
+```
+
+For the compute-skipping experiments, keep `--batch_size 1` so the skip statistics and denoising-step logs are recorded correctly.
+
+### 3. Collect baseline trace logs
+
+For the baseline plotting pipeline, uncomment the `BaselineTraceRecorder` hook in `eval.py`, copy in `baseline-plotting/modeling.py`, and run evaluation. The trace recorder save path is set inside `eval.py`.
+
+```bash
+accelerate launch eval.py   --tasks gsm8k   --batch_size 1   --num_fewshot 0   --limit 100   --confirm_run_unsafe_code   --model fast_dllm_v2   --fewshot_as_multiturn   --apply_chat_template   --model_args model_path=Efficient-Large-Model/Fast_dLLM_v2_7B,threshold=1,show_speed=True
+```
+
+### 4. Run the baseline plotting scripts
+
+After the baseline trace logs are collected, run the plotting scripts from the repo root. Each script reads the saved baseline trace logs and writes its figure to the configured output folder.
+
+```bash
+# Part A examples
+python baseline-plotting/part-a-scripts/plot_one_sample.py
+python baseline-plotting/part-a-scripts/plot_100_layer.py
+
+# Part B examples
+python baseline-plotting/part-b-scripts/plot_100_token.py
+python baseline-plotting/part-b-scripts/plot_hidden_attn_ffn_scatter.py
+
+# Part C examples
+python baseline-plotting/part-c-scripts/plot_100_attn_similarity.py
+python baseline-plotting/part-c-scripts/plot_100_ffn_similarity.py
+```
+
+### 5. Run compute-skipping evaluation
+
+For compute-skipping runs, keep the matching token-level or layer-level `modeling.py` active and use `eval.py` with the appropriate skip arguments. Logs are written under `compute-skipping/logs/<setting_name>/`.
+
+```bash
+# Baseline point for the final compute-skipping plot
+accelerate launch eval.py   --tasks gsm8k   --batch_size 1   --num_fewshot 0   --limit 100   --confirm_run_unsafe_code   --model fast_dllm_v2   --fewshot_as_multiturn   --apply_chat_template   --model_args model_path=Efficient-Large-Model/Fast_dLLM_v2_7B,threshold=0.85,show_speed=True,token_skip_enabled=false
+
+# Token-level cosine-threshold example
+accelerate launch eval.py   --tasks gsm8k   --batch_size 1   --num_fewshot 0   --limit 100   --confirm_run_unsafe_code   --model fast_dllm_v2   --fewshot_as_multiturn   --apply_chat_template   --model_args model_path=Efficient-Large-Model/Fast_dLLM_v2_7B,threshold=0.85,show_speed=True,token_skip_enabled=true,token_skip_mode=threshold,token_skip_threshold=0.99
+
+# Token-level top-k example
+accelerate launch eval.py   --tasks gsm8k   --batch_size 1   --num_fewshot 0   --limit 100   --confirm_run_unsafe_code   --model fast_dllm_v2   --fewshot_as_multiturn   --apply_chat_template   --model_args model_path=Efficient-Large-Model/Fast_dLLM_v2_7B,threshold=0.85,show_speed=True,token_skip_enabled=true,token_skip_mode=topk,token_skip_topk_percent=25
+
+# Layer-level average-similarity example
+accelerate launch eval.py   --tasks gsm8k   --batch_size 1   --num_fewshot 0   --limit 100   --confirm_run_unsafe_code   --model fast_dllm_v2   --fewshot_as_multiturn   --apply_chat_template   --model_args model_path=Efficient-Large-Model/Fast_dLLM_v2_7B,threshold=0.85,show_speed=True,layer_skip_enabled=true,layer_skip_aggregation=avg,layer_skip_threshold=0.99
+
+# Layer-level max-similarity example
+accelerate launch eval.py   --tasks gsm8k   --batch_size 1   --num_fewshot 0   --limit 100   --confirm_run_unsafe_code   --model fast_dllm_v2   --fewshot_as_multiturn   --apply_chat_template   --model_args model_path=Efficient-Large-Model/Fast_dLLM_v2_7B,threshold=0.85,show_speed=True,layer_skip_enabled=true,layer_skip_aggregation=max,layer_skip_threshold=0.99
+```
+
+### 6. Main configurables
+
+- `threshold`: Base Fast-dLLM decode threshold. This controls how aggressively tokens are revealed during denoising, and it is separate from the token-skip and layer-skip thresholds.
+- `show_speed`: Prints decode timing and token-throughput information during evaluation.
+- `token_skip_enabled`: Turns token-level skipping on or off.
+- `token_skip_mode`: Chooses `threshold` or `topk` token skipping.
+- `token_skip_threshold`: Cosine-similarity threshold used for threshold-based token reuse.
+- `token_skip_topk_percent`: Percentage of tokens kept active when `token_skip_mode=topk`.
+- `layer_skip_enabled`: Turns layer-level skipping on or off.
+- `layer_skip_aggregation`: Chooses `avg` or `max` to reduce per-token cosine values into one layer-level similarity score.
+- `layer_skip_threshold`: Cosine-similarity threshold used for layer reuse.
+- `--limit`: Number of evaluation samples to run. Use small values for debugging and `100` for the project summary runs.
+- `--batch_size`: Keep this at `1` for the skip experiments so the log format and step counting stay correct.
+
+Only one skip family should be active at a time. `eval.py` is set up to run either token-level skipping or layer-level skipping, not both together.
+
+### 7. Generate the final Accuracy vs FLOPs plot
+
+After the evaluation runs finish, update `compute-skipping/plotting/overall_results.csv` with the measured accuracies for each setting and then run the final plotting script:
+
+```bash
+python compute-skipping/plotting/plot_accuracy_vs_flops.py
+```
+
+This script reads the JSON logs in `compute-skipping/logs/`, computes the theoretical FLOPs reduction and average denoising steps, and writes the final plot and table into `compute-skipping/plotting/`.
+
 # Fast-dLLM v2: Efficient Block-Diffusion Large Language Model
 
 [![Project](https://img.shields.io/static/v1?label=Project&message=Github&color=blue&logo=github-pages)](https://nvlabs.github.io/Fast-dLLM/v2)
